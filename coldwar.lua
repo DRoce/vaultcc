@@ -6,13 +6,9 @@
 
 --[[
 TODO:
-fix healthbar, health is an attribute/item under each body part, we can either average it or just use health of target part
-add auto reload
-look at infinite ammo, or auto get ammo from ammo boxes
-look at infinite penetration
 look at terrain wallbang
 look at viewmodel mods like instant aim, visuals, etc
-look at instant equip, instant reload (reload debug logs are being printed in console rn, so find reload func like that)
+look at instant reload (reload debug logs are being printed in console rn, so find reload func like that)
 ]]
 
 local gc = getgc(true)
@@ -82,9 +78,6 @@ local cfg = {
         InstantHeal = false,
         FastRevive = false,
         CarMods = false,
-        DriveAnyCar = false,
-        QuickClimb = false,
-        ShootInCar = false,
     }
 }
 
@@ -170,10 +163,6 @@ functions.firemodestart = {func = FiremodeController.start, upv = debug.getupval
 functions.awaitLength = {func = nil}
 functions.movementupdate = {func = nil}
 functions.healLimb = {func = nil}         -- bandage module: heals a limb (we read its upvalues for the remote)
-functions.canEnterSeat = {func = nil}     -- vehicle controller: gates who can sit in a seat
-functions.invEquip = {func = nil}         -- inventory controller: equip(tool)
-functions.onVehicleState = {func = nil}   -- inventory controller: holsters your weapon on sit
-functions.getAnimLength = {func = nil}    -- animate module: GetAnimationLength (vehicle enter/exit waits)
 functions.reloadContext = {func = nil}    -- reload controller: _context (holds the reload timings)
 functions.muzzlesConfig = {func = nil}    -- weapon config manager: GetAllMuzzlesConfig (fire rate, ammo, penetration)
 
@@ -200,15 +189,8 @@ for _,v in pairs(gc) do
         functions.movementupdate.func = v
     elseif info.name == 'healLimb' then
         functions.healLimb.func = v
-    elseif info.name == 'CanEnterSeat' then
-        functions.canEnterSeat.func = v
-    elseif info.name == 'equip' and string.find(info.source, "Inventory") then
-        functions.invEquip.func = v
+        functions.healLimb.upv = upvalues
     elseif info.name == 'onVehicleState' then
-        functions.onVehicleState.func = v
-    elseif info.name == 'GetAnimationLength' then
-        functions.getAnimLength.func = v
-    elseif info.name == '_context' and table.find(constants, "reloadTime") then
         functions.reloadContext.func = v
     elseif info.name == 'GetAllMuzzlesConfig' then
         functions.muzzlesConfig.func = v
@@ -253,6 +235,62 @@ functions.fire.func = hookfunction(functions.fire.func, function(p20, p21)
 
     rbShots = rbShots + 1 -- your own shots drain the mag too; keep the ragebot's count honest
 
+
+  		-- upvalues: (copy) v_u_3, (copy) v_u_7, (copy) v_u_11, (copy) v_u_8, (copy) v_u_4, (copy) spreadVector, (copy) v_u_6, (copy) v_u_5, (copy) v_u_10
+		local v22 = p20.config
+		local v23 = v_u_3:getCharacter()
+		if v23 then
+			v23 = v23:FindFirstChild("Right Arm")
+		end
+		local v24 = (v_u_7.CFrame.Position - v_u_7.Focus.Position).Magnitude <= 0.75 and p20.viewmodelAttachment or p20.attachment
+		local v25 = v24.WorldPosition
+		local v26 = v24.WorldCFrame.LookVector
+		if v23 then
+			local v27 = (v25 - v23.CFrame.Position).Magnitude
+			local v28 = v25 - v26 * v27
+			v_u_11.FilterDescendantsInstances = { v_u_8.Character, workspace.Ignore }
+			local v29 = workspace:Raycast(v28, v26 * v27, v_u_11)
+			if v29 then
+				local v30 = v29.Distance
+				local v31 = math.min(0.01, v30)
+				v25 = v29.Position - v26 * v31
+			end
+		end
+		local v32 = v22.DefaultAngle or 0
+		local v33 = math.rad(v32)
+		local v34 = v_u_4.zeroAngle() or v33
+		local v35 = (v24.WorldCFrame * CFrame.Angles(v34, 0, 0)).LookVector
+
+		if cfg.Combat.SilentEnabled then
+           	local aimTarget = util.getTarget()
+           	if aimTarget then
+          		v35 = (aimTarget.Position - v25).Unit   -- aim from the muzzle to the part
+           	end
+		end
+
+		p20.animator:play("GunShoot")
+		local v36 = v22.BulletSettings[p21]
+		local v37 = v36.ShotAmount or 1
+		local v38 = v36.Spread or 1
+		local v39 = table.create(v37)
+		for v40 = 1, v37 do
+			v39[#v39 + 1] = spreadVector(v35, v38)
+		end
+		local v41 = p20.tool.Sounds:FindFirstChild("Muzzle" .. p20.index)
+		if v41 then
+			v41 = v41:FindFirstChild("Fire")
+		end
+		if v41 then
+			v_u_6.Play(v41, v24.WorldPosition, v22.SoundRange or 3000)
+		end
+		v_u_5.MuzzleFlash(v24, p20.tool.Name)
+		v_u_10.fireVolley(p20.tool, p20.index, p21, v25, v39)
+		if not p20:isHandAction() then
+			v_u_5.Casing(v24, p20.tool.Name)
+		end
+
+
+    --[[
     local v22 = p20.config
 	local v23 = v_u_3:getCharacter()
 	if v23 then
@@ -307,7 +345,7 @@ functions.fire.func = hookfunction(functions.fire.func, function(p20, p21)
 	v_u_10.fireVolley(p20.tool, p20.index, p21, v26, v40)
 	if not p20:isHandAction() then
 		v_u_5.casing(v43, p20.index)
-	end
+	end--]]
 end)
 -- aiming shi
 functions.aimtoggle.func = hookfunction(functions.aimtoggle.func, function(...)
@@ -465,17 +503,6 @@ local magsConn = RunService.Heartbeat:Connect(function(dt)
     end
 end)
 
--- no bandage slowdown: healLimb drops SpeedMultiplier (0 for legs, 0.7 otherwise) while
--- healing. the char gets an "isBandaging" attribute, so force the multiplier back to 1
-local bandageConn = RunService.Heartbeat:Connect(function()
-    if not cfg.Combat.NoBandageSlowdown then return end
-    local char = LocalPlayer.Character
-    if char and char:GetAttribute("isBandaging") then
-        local cv = Wielder:getCharacterValues()
-        local sm = cv and cv:FindFirstChild("SpeedMultiplier")
-        if sm then sm.Value = 1 end
-    end
-end)
 
 -- auto heal: fire the game's HealLimb remote for each damaged limb directly. healLimb
 -- (found in gc) captures the bandage remote as upvalue 1 and the currently equipped
@@ -529,33 +556,82 @@ end)
 -- config carries Transmission + Damage + ShopInfo). reapplied on a slow timer so newly
 -- spawned/entered cars get modded without a per-frame getgc scan
 local carTransmission = {
-    DriveType = "AWD",
-    FinalDrive = 6.80,
-    IdleRPM = 1000,
-    IdleTorque = 140,
-    IdleTorqueCurve = 0.15,
-    PeakTorque = 460,
-    PeakTorqueRPM = 5200,
-    RedlineRPM = 9000,
-    RedlineTorque = 280,
-    RedlineTorqueCurve = 0.5,
-    ShiftRPM = 6500,
-    HorsepowerLimit = 850,
-    BrakeStrength = 26000,
-    Mass = 750,
-    WheelMass = 8,
-    TurnRadius = 13,
-    SuspensionHeight = 1.1,
-    StiffnessModifier = 7,
-    DampingModifier = 1.3,
-    Ratios = {
-        [-1] = 7.497,
-        [0] = 0,
-        4.000,
-        2.500,
-        1.650,
-        1.150,
-    },
+	ChassisType = "Wheeled",
+
+	Wheels = {
+		{ Name = "FrontLeft", Steer = 1, Drive = true },
+		{ Name = "FrontRight", Steer = 1, Drive = true },
+		{ Name = "RearLeft", Steer = 0, Drive = true },
+		{ Name = "RearRight", Steer = 0, Drive = true }
+	},
+
+	DriveType = "AWD",
+	Differential = "Locked",
+	FinalDrive = 6.80,
+
+	Ratios = {
+		[-1] = 7.497,
+		[0] = 0,
+		4.00,
+		2.50,
+		1.65,
+		1.15
+	},
+
+	AutoShift = true,
+	ShiftRPM = 6500,
+
+	IdleRPM = 1000,
+	IdleTorque = 140,
+	IdleTorqueCurve = 0.15,
+	PeakTorque = 460,
+	PeakTorqueRPM = 5200,
+	RedlineRPM = 9000,
+	RedlineTorque = 280,
+	RedlineTorqueCurve = 0.5,
+	HorsepowerLimit = 850,
+	TorqueScale = 6,
+
+	TopSpeed = 220,
+
+	-- Maximum traction
+	PeakGrip = 2.5,
+	SlideGrip = 2.25,
+	PeakSlip = 0.5,
+	Grip = 40,
+
+	-- Brakes
+	BrakeMultiplier = 10,
+	HandBrakeMultiplier = 5.5,
+	RollingFriction = 0.05,
+
+	-- Burnout resistance
+	BurnoutSyncingFactor = 1,
+	BurnoutDesyncAmplifier = 0,
+	BurnoutSyncAbruptness = 10,
+
+	-- Handling
+	DriftGrip = 100,
+	DriftReduction = 0.95,
+	TurningZForceMultiplier = 1,
+	TurnRadius = 13,
+	SteerSpeed = 5,
+	HighSpeedSteerReduction = 0.45,
+
+	ForceHeight = 0.65,
+	Ackermann = true,
+
+	-- Weight
+	Mass = 750,
+	WheelMass = 8,
+
+	-- Suspension
+	SuspensionHeight = 1.1,
+	RideHeight = 1.0,
+	WheelOffset = 0.5,
+	ReboundDampingModifier = 1.3,
+	CompressionDampingModifier = 1.0,
+	DamperActiveness = 0.7
 }
 local function applyCarMods()
     for _, v in pairs(getgc(true)) do
@@ -573,53 +649,7 @@ local carModsConn = RunService.Heartbeat:Connect(function(dt)
     applyCarMods()
 end)
 
--- drive any car: the vehicle controller's CanEnterSeat gates by team/owner/occupancy.
--- force it true so any seat is enterable
-if functions.canEnterSeat.func then
-    functions.canEnterSeat.func = hookfunction(functions.canEnterSeat.func, function(...)
-        if cfg.Combat.DriveAnyCar then return true end
-        return functions.canEnterSeat.func(...)
-    end)
-end
 
--- quick vehicle enter/exit: the enter/exit sequences task.wait on the animation length.
--- collapsing GetAnimationLength makes those waits near-instant so you climb in/out fast
-if functions.getAnimLength.func then
-    functions.getAnimLength.func = hookfunction(functions.getAnimLength.func, function(...)
-        if cfg.Combat.QuickClimb then return 0.05 end
-        return functions.getAnimLength.func(...)
-    end)
-end
-
--- shoot in vehicle: the game holsters your weapon when you sit (onVehicleState) and
--- blocks equip while Sit/PlatformStand. skip the auto-holster, and re-run equip's own
--- logic (read live off its upvalues) without the seat gate so you can swap guns in a car
-if functions.onVehicleState.func then
-    functions.onVehicleState.func = hookfunction(functions.onVehicleState.func, function(...)
-        if cfg.Combat.ShootInCar then return end
-        return functions.onVehicleState.func(...)
-    end)
-end
-if functions.invEquip.func then
-    functions.invEquip.func = hookfunction(functions.invEquip.func, function(p65)
-        local orig = functions.invEquip.func
-        if not cfg.Combat.ShootInCar then return orig(p65) end
-        -- upvalues: 1 equipped, 2 tool list, 3 busy flag, 4 wielder, 6 holsterCurrent, 7 drawTool
-        local equipped = debug.getupvalue(orig, 1)
-        local list = debug.getupvalue(orig, 2)
-        local busy = debug.getupvalue(orig, 3)
-        local wielder = debug.getupvalue(orig, 4)
-        local holsterCurrent = debug.getupvalue(orig, 6)
-        local drawTool = debug.getupvalue(orig, 7)
-        if p65 and p65 ~= equipped and list and table.find(list, p65)
-           and (not busy) and wielder and wielder:isConscious() then
-            debug.setupvalue(orig, 3, true) -- busy = true
-            if debug.getupvalue(orig, 1) then holsterCurrent() end
-            if wielder:isConscious() and p65.Parent then drawTool(p65) end
-            debug.setupvalue(orig, 3, false) -- busy = false
-        end
-    end)
-end
 
 -- instant reload: the reload timings live in the context table _context builds. shrink
 -- them so the reload lockout is effectively gone
@@ -813,6 +843,26 @@ local ragebotThread = task.spawn(function()
             pcall(ragebotStep)
         end
     end
+end)
+
+local oldIndex
+oldIndex = hookmetamethod(game, "__index", function(self, key)
+    if cfg.Combat.NoHurtSlowdown then
+        if key == "Value" and not checkcaller() and typeof(self) == "Instance" then
+            if oldIndex(self, "Name") == "Health" then
+                local parent = oldIndex(self, "Parent")
+                if parent then
+                    local pName = oldIndex(parent, "Name")
+                    if pName == "Left Leg" or pName == "Right Leg" then
+                        local maxHp = self:GetAttribute("MaxHealth")
+                        return maxHp or 100
+                    end
+                end
+            end
+        end
+    end
+
+    return oldIndex(self, key)
 end)
 
 
@@ -1271,7 +1321,7 @@ miscMove:AddToggle("omnisprint", { Text = "Omni Sprint", Default = false, Toolti
 Toggles['omnisprint']:OnChanged(function(val) -- omni sprint
     cfg.Combat.OmniSprint = val
 end)
-miscMove:AddToggle("nohurtslowdown", { Text = "No Hurt Slowdown", Default = false, Tooltip = "Full speed with injured legs" })
+miscMove:AddToggle("nohurtslowdown", { Text = "No Hurt Slowdown", Default = false, Tooltip = "Side Effect: Legs will not show as damaged while enabled" })
 Toggles['nohurtslowdown']:OnChanged(function(val) -- no hurt slowdown
     cfg.Combat.NoHurtSlowdown = val
 end)
@@ -1304,23 +1354,11 @@ Toggles['carmods']:OnChanged(function(val) -- car mods
     cfg.Combat.CarMods = val
     if val then applyCarMods() end
 end)
-miscVehicle:AddToggle("driveanycar", { Text = "Drive Any Car", Default = false, Tooltip = "Enter any vehicle" })
-Toggles['driveanycar']:OnChanged(function(val) -- drive any car
-    cfg.Combat.DriveAnyCar = val
-end)
-miscVehicle:AddToggle("quickclimb", { Text = "Quick Enter/Exit", Default = false, Tooltip = "Enter and exit vehicles instantly" })
-Toggles['quickclimb']:OnChanged(function(val) -- quick climb
-    cfg.Combat.QuickClimb = val
-end)
-miscVehicle:AddToggle("shootincar", { Text = "Shoot In Vehicle", Default = false, Tooltip = "Use weapons while in a vehicle" })
-Toggles['shootincar']:OnChanged(function(val) -- shoot in car
-    cfg.Combat.ShootInCar = val
-end)
 
 -- settings tab (menu + config)
 local menuGroup = Tabs.Settings:AddLeftGroupbox("Menu")
 
-local DiscordInvite = "Z7tvDkBUxX"
+local DiscordInvite = "NUfjhQcETc"
 
 -- opens an invite straight in the desktop discord client. discord runs a local rpc
 -- server on one of ports 6463-6472; the INVITE_BROWSER command pops the invite. the
@@ -1417,4 +1455,4 @@ ThemeManager:ApplyToTab(Tabs.Settings)
 -- load autoload cfg last (fires OnChanged -> applyESP)
 SaveManager:LoadAutoloadConfig()
 
-Library:Notify("Cold War loaded <3")
+Library:Notify("Cold War loaded - ESP tab ready.")
