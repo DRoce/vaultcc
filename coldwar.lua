@@ -53,17 +53,26 @@ local cfg = {
         Ragebot = false,
         RagebotWallbang = false,
         RagebotAutoReload = false,
+        RagebotTPAura = false,
         InstantReload = false,
         SilentTarget = "Head",
         SilentFov = 100,
         SilentFovEnabled = false,
         SilentExcludeTeammates = true,
+        SilentVisibleCheck = false,
+        SilentDistanceCheck = false,
+        SilentMaxDistance = 500,
         FovDrawEnabled = false,
         FovColor = Color3.fromRGB(255, 255, 255),
         FovThickness = 1,
         AimAnywhere = true,
         InstantADS = true,
         NoADSSlowdown = true,
+        AimbotEnabled = false,
+        AimbotSmoothness = 1,
+        AimbotAimType = "Hold",
+        AimbotMethod = "Camera",
+        AimbotTarget = "Head",
         ForceAuto = true,
         InfiniteMags = false,
         InstantEquip = false,
@@ -83,6 +92,9 @@ local cfg = {
 
 local util = {}
 util.target = nil -- cached target part, refreshed every few frames
+
+local WeaponConfigs
+local isExplosiveShot = false
 
 -- downed players aren't dead but lie there with CharacterValues.Unconscious set true
 -- (the same value the revive prompt reads). skip them so we don't shoot corpses
@@ -104,51 +116,124 @@ local function targetValid(part)
     return hum ~= nil and hum.Health > 0
 end
 
--- the expensive scan: closest target to the cursor within fov
+-- 1-frame memoized scan: closest target to the cursor within fov
+local cachedTarget = nil
+local lastScanTick = 0
+
 local function findBest()
+    local now = os.clock()
+    if now == lastScanTick then
+        return cachedTarget
+    end
+    lastScanTick = now
+
     local camera = workspace.CurrentCamera
-    if not camera then return nil end
-    local me = Players.LocalPlayer
-    -- GetMouseLocation is absolute (incl. inset), WorldToViewportPoint is viewport;
-    -- subtract the inset so the compare-center actually sits on the cursor
-    local mouse = UserInputService:GetMouseLocation() - GuiService:GetGuiInset()
+    if not camera then
+        cachedTarget = nil
+        return nil
+    end
+
+    local me = LocalPlayer
+    local camPos = camera.CFrame.Position
+    local mouse = UserInputService:GetMouseLocation() -- Absolute Screen Space
     local best, bestDist
+
+    local ignore = me.Character and { me.Character } or {}
+    local ig = workspace:FindFirstChild("Ignore")
+    if ig then ignore[#ignore + 1] = ig end
+
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= me and plr.Character and not isDowned(plr.Character) then
             if (not (me.Team and plr.Team == me.Team)) or (not cfg.Combat.SilentExcludeTeammates) then
                 local part = plr.Character:FindFirstChild(cfg.Combat.SilentTarget)
                 local hum = plr.Character:FindFirstChildOfClass("Humanoid")
                 if part and hum and hum.Health > 0 then
-                    local sp, onScreen = camera:WorldToViewportPoint(part.Position)
-                    if onScreen and sp.Z > 0 then
-                        local dist = (Vector2.new(sp.X, sp.Y) - mouse).Magnitude
-                        local within = (not cfg.Combat.SilentFovEnabled) or dist <= cfg.Combat.SilentFov
-                        if within and (not bestDist or dist < bestDist) then
-                            best, bestDist = part, dist
+                    local pos = part.Position
+                    local studsDist = (pos - camPos).Magnitude
+                    if (not cfg.Combat.SilentDistanceCheck) or studsDist <= cfg.Combat.SilentMaxDistance then
+                        local sp, onScreen = camera:WorldToViewportPoint(pos)
+                        if onScreen and sp.Z > 0 then
+                            local dist = (Vector2.new(sp.X, sp.Y) - mouse).Magnitude
+                            local within = (not cfg.Combat.SilentFovEnabled) or dist <= cfg.Combat.SilentFov
+                            if within and (not bestDist or dist < bestDist) then
+                                local isVis = true
+                                if cfg.Combat.SilentVisibleCheck then
+                                    local delta = pos - camPos
+                                    local p = RaycastParams.new()
+                                    p.FilterType = Enum.RaycastFilterType.Exclude
+                                    p.FilterDescendantsInstances = ignore
+                                    local hit = workspace:Raycast(camPos, delta, p)
+                                    if hit and not hit.Instance:IsDescendantOf(plr.Character) then
+                                        isVis = false
+                                    end
+                                end
+                                if isVis then
+                                    best, bestDist = part, dist
+                                end
+                            end
                         end
                     end
                 end
             end
         end
     end
+    cachedTarget = best
     return best
 end
 
--- called by the silent aim hook when firing; verify the cached target (refresh if it died)
+-- synchronized target provider: guarantees 1:1 match between silent aim and target indicators
 util.getTarget = function()
-    if not targetValid(util.target) then
-        util.target = findBest()
+    if targetValid(cachedTarget) then
+        return cachedTarget
     end
-    return util.target
+    return findBest()
 end
 
--- refresh the cached target every 5 frames (cheap between refreshes = no fps drop)
+-- refresh the cached target every 3 frames (keeps UI perfectly synced with zero FPS drop)
 local targetFrame = 0
 RunService.Heartbeat:Connect(function()
     targetFrame = targetFrame + 1
-    if targetFrame >= 5 then
+    if targetFrame >= 3 then
         targetFrame = 0
         util.target = findBest()
+    end
+end)
+
+-- camera / mouse aimbot loop
+RunService.RenderStepped:Connect(function()
+    if not cfg.Combat.AimbotEnabled then return end
+    local isAimbotActive = false
+    if Options and Options.aimbotkey then
+        isAimbotActive = Options.aimbotkey:GetState()
+    end
+    if not isAimbotActive then return end
+
+    local target = util.getTarget()
+    if not (target and target.Parent) then return end
+
+    local camera = workspace.CurrentCamera
+    if not camera then return end
+
+    local targetPos = target.Position
+    local smoothness = math.max(1, cfg.Combat.AimbotSmoothness or 1)
+
+    if cfg.Combat.AimbotMethod == "Mouse" and mousemoverel then
+            local sp, onScreen = camera:WorldToViewportPoint(targetPos)
+        if onScreen and sp.Z > 0 then
+            local mouse = UserInputService:GetMouseLocation()
+            local deltaX = (sp.X - mouse.X) / smoothness
+            local deltaY = (sp.Y - mouse.Y) / smoothness
+            mousemoverel(deltaX, deltaY)
+        end
+    else
+        -- Camera CFrame interpolation
+        local currentCF = camera.CFrame
+        local targetCF = CFrame.new(currentCF.Position, targetPos)
+        if smoothness == 1 then
+            camera.CFrame = targetCF
+        else
+            camera.CFrame = currentCF:Lerp(targetCF, 1 / smoothness)
+        end
     end
 end)
 
@@ -284,7 +369,20 @@ functions.fire.func = hookfunction(functions.fire.func, function(p20, p21)
 			v_u_6.Play(v41, v24.WorldPosition, v22.SoundRange or 3000)
 		end
 		v_u_5.MuzzleFlash(v24, p20.tool.Name)
+		isExplosiveShot = (function()
+			local wc = WeaponConfigs and WeaponConfigs[p20.tool.Name]
+			if not wc then return false end
+			for _, muzzle in pairs(wc) do
+				if type(muzzle) == "table" and type(muzzle.BulletSettings) == "table" then
+					for _, bs in ipairs(muzzle.BulletSettings) do
+						if type(bs) == "table" and bs.ExplosionSettings then return true end
+					end
+				end
+			end
+			return false
+		end)()
 		v_u_10.fireVolley(p20.tool, p20.index, p21, v25, v39)
+		isExplosiveShot = false
 		if not p20:isHandAction() then
 			v_u_5.Casing(v24, p20.tool.Name)
 		end
@@ -463,12 +561,14 @@ end
 -- bullet trajectory mods: drop + travel speed all come out of Trajectory.new
 local oldTrajNew = Trajectory.new
 Trajectory.new = function(params)
-    if cfg.Combat.NoBulletDrop then
-        params.Gravity = 0
-    end
-    if cfg.Combat.InstantBullet then
-        params.MuzzleSpeed = 1e6 -- covers max distance on the first step = hitscan
-        params.K = 0             -- no speed decay
+    if not isExplosiveShot then
+        if cfg.Combat.NoBulletDrop then
+            params.Gravity = 0
+        end
+        if cfg.Combat.InstantBullet then
+            params.MuzzleSpeed = 1e6 -- covers max distance on the first step = hitscan
+            params.K = 0             -- no speed decay
+        end
     end
     return oldTrajNew(params)
 end
@@ -567,34 +667,40 @@ local carTransmission = {
 
 	DriveType = "AWD",
 	Differential = "Locked",
-	FinalDrive = 6.80,
+
+	-- Acceleration
+	FinalDrive = 7.50,
 
 	Ratios = {
 		[-1] = 7.497,
 		[0] = 0,
-		4.00,
-		2.50,
-		1.65,
-		1.15
+		4.50,
+		2.80,
+		1.80,
+		1.20
 	},
 
 	AutoShift = true,
-	ShiftRPM = 6500,
+	ShiftRPM = 7000,
 
+	-- Engine
 	IdleRPM = 1000,
 	IdleTorque = 140,
 	IdleTorqueCurve = 0.15,
-	PeakTorque = 460,
-	PeakTorqueRPM = 5200,
+
+	PeakTorque = 520,
+	PeakTorqueRPM = 5000,
+
 	RedlineRPM = 9000,
-	RedlineTorque = 280,
+	RedlineTorque = 300,
 	RedlineTorqueCurve = 0.5,
-	HorsepowerLimit = 850,
+
+	HorsepowerLimit = 1000,
 	TorqueScale = 6,
 
 	TopSpeed = 220,
 
-	-- Maximum traction
+	-- Traction
 	PeakGrip = 2.5,
 	SlideGrip = 2.25,
 	PeakSlip = 0.5,
@@ -613,22 +719,26 @@ local carTransmission = {
 	-- Handling
 	DriftGrip = 100,
 	DriftReduction = 0.95,
-	TurningZForceMultiplier = 1,
-	TurnRadius = 13,
-	SteerSpeed = 5,
-	HighSpeedSteerReduction = 0.45,
 
-	ForceHeight = 0.65,
+	TurningZForceMultiplier = 1,
+
+	-- Slower / smoother steering
+	TurnRadius = 20,
+	SteerSpeed = 2.5,
+	HighSpeedSteerReduction = 0.65,
+
+	ForceHeight = 0.75,
 	Ackermann = true,
 
 	-- Weight
 	Mass = 750,
 	WheelMass = 8,
 
-	-- Suspension
-	SuspensionHeight = 1.1,
-	RideHeight = 1.0,
+	-- Keep chassis/suspension geometry stable
+	SuspensionHeight = 2,
+	RideHeight = 1.5,
 	WheelOffset = 0.5,
+
 	ReboundDampingModifier = 1.3,
 	CompressionDampingModifier = 1.0,
 	DamperActiveness = 0.7
@@ -673,7 +783,7 @@ local ClientFire = functions.fire.upv and functions.fire.upv[9] -- the module wi
 local WeaponRemote = Remotes:WaitForChild("Weapon")             -- reload requests go here
 -- the config manager keeps every weapon config keyed by tool name; grab that table off
 -- GetAllMuzzlesConfig so we get real fire rate / ammo / penetration instead of guessing
-local WeaponConfigs = functions.muzzlesConfig.func and debug.getupvalue(functions.muzzlesConfig.func, 1)
+WeaponConfigs = functions.muzzlesConfig.func and debug.getupvalue(functions.muzzlesConfig.func, 1)
 local Materials = select(2, pcall(function()
     return require(RS:WaitForChild("Shared"):WaitForChild("Ballistics"):WaitForChild("ProjectileMaterials"))
 end))
@@ -830,10 +940,80 @@ local function ragebotStep()
     if best and os.clock() >= rbNextFire then
         rbNextFire = os.clock() + 60 / firerate -- respect the weapon's real fire rate
         local dir = (best.Position - origin).Unit
+        isExplosiveShot = (function()
+            local wc = WeaponConfigs and WeaponConfigs[tool.Name]
+            if not wc then return false end
+            for _, muzzle in pairs(wc) do
+                if type(muzzle) == "table" and type(muzzle.BulletSettings) == "table" then
+                    for _, bs in ipairs(muzzle.BulletSettings) do
+                        if type(bs) == "table" and bs.ExplosionSettings then return true end
+                    end
+                end
+            end
+            return false
+        end)()
         pcall(function()
             ClientFire.fire(tool, muzzleIndex, bulletIndex, origin, dir, {})
         end)
+        isExplosiveShot = false
         rbShots = rbShots + 1
+    end
+end
+
+local lastTpTime = 0
+local function tpAuraStep()
+    if not cfg.Combat.RagebotTPAura then return end
+    if os.clock() - lastTpTime < 2.0 then return end -- hold at target location for 2s before next teleport
+
+    local me = LocalPlayer
+    local char = me.Character
+    if not char then return end
+    local myHrp = char:FindFirstChild("HumanoidRootPart")
+    local head = char:FindFirstChild("Head") or myHrp
+    if not (myHrp and head) then return end
+    local origin = head.Position
+
+    local ignore = { char }
+    local ig = workspace:FindFirstChild("Ignore")
+    if ig then ignore[#ignore + 1] = ig end
+
+    local anyVisible = false
+    local nearestEnemyChar, nearestDist
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= me and plr.Character and not isDowned(plr.Character) then
+            if not (me.Team and plr.Team == me.Team) then
+                local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+                local targetHrp = plr.Character:FindFirstChild("HumanoidRootPart")
+                local targetHead = plr.Character:FindFirstChild("Head") or targetHrp
+                if hum and hum.Health > 0 and targetHrp then
+                    local delta = targetHead.Position - origin
+                    local p = RaycastParams.new()
+                    p.FilterType = Enum.RaycastFilterType.Exclude
+                    p.FilterDescendantsInstances = ignore
+                    local hit = workspace:Raycast(origin, delta, p)
+
+                    if not hit or hit.Instance:IsDescendantOf(plr.Character) then
+                        anyVisible = true
+                        break
+                    end
+
+                    local dist = (targetHrp.Position - origin).Magnitude
+                    if not nearestDist or dist < nearestDist then
+                        nearestEnemyChar = plr.Character
+                        nearestDist = dist
+                    end
+                end
+            end
+        end
+    end
+
+    if not anyVisible and nearestEnemyChar then
+        local targetHrp = nearestEnemyChar:FindFirstChild("HumanoidRootPart")
+        if targetHrp and myHrp then
+            lastTpTime = os.clock()
+            myHrp.CFrame = targetHrp.CFrame * CFrame.new(0, 0, 3)
+        end
     end
 end
 
@@ -841,6 +1021,9 @@ local ragebotThread = task.spawn(function()
     while task.wait(0.03) do -- paced loop, cheaper than a render/heartbeat connection
         if cfg.Combat.Ragebot then
             pcall(ragebotStep)
+        end
+        if cfg.Combat.RagebotTPAura then
+            pcall(tpAuraStep)
         end
     end
 end)
@@ -1063,6 +1246,22 @@ end)
 
 --right: aiming
 local aiming = Tabs.Combat:AddRightGroupbox("Aiming")
+aiming:AddToggle("aimbotenabled", { Text = "Aimbot Enabled", Default = false, Tooltip = "Camera / Mouse Aimbot" }):AddKeyPicker("aimbotkey", { Default = "R", SyncToggleState = false, Mode = "Hold", Text = "Aimbot Key" })
+Toggles['aimbotenabled']:OnChanged(function(val)
+    cfg.Combat.AimbotEnabled = val
+end)
+aiming:AddDropdown("aimbotmethod", { Text = "Aim Method", Values = { "Camera", "Mouse" }, Default = 1, Multi = false })
+Options['aimbotmethod']:OnChanged(function(val)
+    cfg.Combat.AimbotMethod = val
+end)
+aiming:AddDropdown("aimbottarget", { Text = "Target part", Values = { "Head", "Torso", "HumanoidRootPart", "Left Arm", "Right Arm", "Left Leg", "Right Leg" }, Default = 1, Multi = false })
+Options['aimbottarget']:OnChanged(function(val)
+    cfg.Combat.AimbotTarget = val
+end)
+aiming:AddSlider("aimbotsmoothness", { Text = "Smoothness", Default = 1, Min = 1, Max = 20, Rounding = 1, Tooltip = "1 = Instant lock, higher = smoother" })
+Options['aimbotsmoothness']:OnChanged(function(val)
+    cfg.Combat.AimbotSmoothness = val
+end)
 aiming:AddToggle("aimanywhere", { Text = "Aim Anywhere", Default = true, Tooltip = "Aim in any stance" })
 Toggles['aimanywhere']:OnChanged(function(val) -- aim anywhere
     cfg.Combat.AimAnywhere = val
@@ -1078,7 +1277,7 @@ end)
 
 --left: silent
 local silent = Tabs.Combat:AddLeftGroupbox("Silent Aim")
-silent:AddToggle("silentenabled", { Text = "Enabled", Default = true, Tooltip = "Master switch for Silent Aim" })
+silent:AddToggle("silentenabled", { Text = "Enabled", Default = true, Tooltip = "Master switch for Silent Aim" }):AddKeyPicker("silentbind", { Default = "None", SyncToggleState = true, Mode = "Toggle", Text = "Silent Aim" })
 Toggles['silentenabled']:OnChanged(function(val) -- silent enabled
     cfg.Combat.SilentEnabled = val
 end)
@@ -1086,6 +1285,18 @@ silent:AddDropdown("silenttarget", { Text = "Target part", Values = { "Head", "T
 Options['silenttarget']:OnChanged(function(val) -- target part
     cfg.Combat.SilentTarget = val
     if espCfg then espCfg.HealthBar.Part = val end -- keep "Target part" health in sync
+end)
+silent:AddToggle("silentvisiblecheck", { Text = "Visible Check", Default = false, Tooltip = "Only target visible enemies" })
+Toggles['silentvisiblecheck']:OnChanged(function(val)
+    cfg.Combat.SilentVisibleCheck = val
+end)
+silent:AddToggle("silentdistancecheck", { Text = "Distance Check", Default = false, Tooltip = "Only target enemies within max distance" })
+Toggles['silentdistancecheck']:OnChanged(function(val)
+    cfg.Combat.SilentDistanceCheck = val
+end)
+silent:AddSlider("silentmaxdistance", { Text = "Max Distance", Default = 500, Min = 10, Max = 2000, Rounding = 0, Suffix = " studs" })
+Options['silentmaxdistance']:OnChanged(function(val)
+    cfg.Combat.SilentMaxDistance = val
 end)
 silent:AddToggle("fovenabled", { Text = "FOV Circle", Default = false})
 Toggles['fovenabled']:OnChanged(function(val) -- fov circle enabled
@@ -1122,7 +1333,7 @@ end)
 
 --left: ragebot (separate from silent aim, auto-fires on its own)
 local ragebot = Tabs.Combat:AddLeftGroupbox("Ragebot")
-ragebot:AddToggle("ragebot", { Text = "Enabled", Default = false, Tooltip = "Auto-shoot any enemy you can hit" })
+ragebot:AddToggle("ragebot", { Text = "Enabled", Default = false, Tooltip = "Auto-shoot any enemy you can hit" }):AddKeyPicker("ragebotbind", { Default = "None", SyncToggleState = true, Mode = "Toggle", Text = "Ragebot" })
 Toggles['ragebot']:OnChanged(function(val) -- ragebot
     cfg.Combat.Ragebot = val
 end)
@@ -1134,12 +1345,16 @@ ragebot:AddToggle("ragebotautoreload", { Text = "Auto Reload", Default = false, 
 Toggles['ragebotautoreload']:OnChanged(function(val) -- ragebot auto reload
     cfg.Combat.RagebotAutoReload = val
 end)
+ragebot:AddToggle("ragebottpaura", { Text = "TP Aura", Default = false, Tooltip = "Teleports to the nearest player if none are visible" })
+Toggles['ragebottpaura']:OnChanged(function(val) -- ragebot tp aura
+    cfg.Combat.RagebotTPAura = val
+end)
 
 -- fov circle drawing
 -- screengui in gethui() with coregui fallback, same as the esp lib
 local fovGui = Instance.new("ScreenGui")
 fovGui.Name = "cwfov"
-fovGui.IgnoreGuiInset = true -- absolute space, matches GetMouseLocation + WorldToScreenPoint
+fovGui.IgnoreGuiInset = true -- Absolute Screen Space
 fovGui.ResetOnSpawn = false
 fovGui.DisplayOrder = 100
 fovGui.Parent = (gethui and gethui()) or game:GetService("CoreGui")
@@ -1167,7 +1382,7 @@ RunService:BindToRenderStep("cwfov", Enum.RenderPriority.Camera.Value + 1, funct
         return
     end
 
-    local m = UserInputService:GetMouseLocation()
+    local m = UserInputService:GetMouseLocation() -- Absolute Screen Position
     local r = cfg.Combat.SilentFov
     fovCircle.Size = UDim2.fromOffset(r * 2, r * 2)
     fovCircle.Position = UDim2.fromOffset(m.X, m.Y)
@@ -1179,7 +1394,7 @@ end)
 -- snaplines: one line from the cursor to the cached target (viewport space throughout)
 local snapGui = Instance.new("ScreenGui")
 snapGui.Name = "cwsnap"
-snapGui.IgnoreGuiInset = true -- same space as the esp lib (raw WorldToViewportPoint)
+snapGui.IgnoreGuiInset = true -- Absolute Screen Space
 snapGui.ResetOnSpawn = false
 snapGui.DisplayOrder = 100
 snapGui.Parent = (gethui and gethui()) or game:GetService("CoreGui")
@@ -1195,13 +1410,10 @@ RunService:BindToRenderStep("cwsnap", Enum.RenderPriority.Camera.Value + 1, func
     if cfg.Combat.Snaplines and part and part.Parent then
         local camera = workspace.CurrentCamera
         if camera then
-            -- same space the multi-snapline version drew in (which lined up): raw
-            -- WorldToViewportPoint endpoint (same as the esp lib) + raw GetMouseLocation
-            -- origin (same as the fov circle), no inset math
-            local vp, on = camera:WorldToViewportPoint(part.Position)
-            if on and vp.Z > 0 then
+            local sp, on = camera:WorldToViewportPoint(part.Position)
+            if on and sp.Z > 0 then
                 local origin = UserInputService:GetMouseLocation()
-                local p2 = Vector2.new(vp.X, vp.Y)
+                local p2 = Vector2.new(sp.X, sp.Y)
                 local diff = p2 - origin
                 snapLine.Size = UDim2.fromOffset(diff.Magnitude, 1)
                 snapLine.Position = UDim2.fromOffset((origin.X + p2.X) / 2, (origin.Y + p2.Y) / 2)
@@ -1455,4 +1667,4 @@ ThemeManager:ApplyToTab(Tabs.Settings)
 -- load autoload cfg last (fires OnChanged -> applyESP)
 SaveManager:LoadAutoloadConfig()
 
-Library:Notify("Cold War loaded - ESP tab ready.")
+Library:Notify("Cold War loaded, made with love by vaultt. <3")
