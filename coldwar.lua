@@ -145,34 +145,66 @@ local function findBest()
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= me and plr.Character and not isDowned(plr.Character) then
             if (not (me.Team and plr.Team == me.Team)) or (not cfg.Combat.SilentExcludeTeammates) then
-                local part = plr.Character:FindFirstChild(cfg.Combat.SilentTarget)
                 local hum = plr.Character:FindFirstChildOfClass("Humanoid")
-                if part and hum and hum.Health > 0 then
-                    local pos = part.Position
-                    local studsDist = (pos - camPos).Magnitude
-                    if (not cfg.Combat.SilentDistanceCheck) or studsDist <= cfg.Combat.SilentMaxDistance then
-                        local sp, onScreen = camera:WorldToViewportPoint(pos)
-                        if onScreen and sp.Z > 0 then
-                            local dist = (Vector2.new(sp.X, sp.Y) - mouse).Magnitude
-                            local within = (not cfg.Combat.SilentFovEnabled) or dist <= cfg.Combat.SilentFov
-                            if within and (not bestDist or dist < bestDist) then
-                                local isVis = true
-                                if cfg.Combat.SilentVisibleCheck then
-                                    local delta = pos - camPos
-                                    local p = RaycastParams.new()
-                                    p.FilterType = Enum.RaycastFilterType.Exclude
-                                    p.FilterDescendantsInstances = ignore
-                                    local hit = workspace:Raycast(camPos, delta, p)
-                                    if hit and not hit.Instance:IsDescendantOf(plr.Character) then
-                                        isVis = false
+                if hum and hum.Health > 0 then
+                    
+                    -- 1. DYNAMICALLY LOAD TARGET PARTS
+                    local targetParts = {}
+                    
+                    if cfg.Combat.SilentTarget == "All" then
+                        -- Load every BasePart (Head, Limbs, Torso) except HRP to prevent center-mass bias
+                        for _, child in ipairs(plr.Character:GetChildren()) do
+                            if child:IsA("BasePart") and child.Name ~= "HumanoidRootPart" then
+                                table.insert(targetParts, child)
+                            end
+                        end
+                    elseif cfg.Combat.SilentTarget == "Head and Torso" then
+                        -- Specific multi-part targeting
+                        for _, partName in ipairs({"Head", "Torso", "UpperTorso", "LowerTorso"}) do
+                            local pt = plr.Character:FindFirstChild(partName)
+                            if pt then table.insert(targetParts, pt) end
+                        end
+                    else
+                        -- Fallback to single part
+                        local pt = plr.Character:FindFirstChild(cfg.Combat.SilentTarget)
+                        if pt then table.insert(targetParts, pt) end
+                    end
+
+                    -- 2. SCAN ALL PARTS TO FIND THE CLOSEST ONE
+                    for _, part in ipairs(targetParts) do
+                        local pos = part.Position
+                        local studsDist = (pos - camPos).Magnitude
+                        
+                        if (not cfg.Combat.SilentDistanceCheck) or studsDist <= cfg.Combat.SilentMaxDistance then
+                            local sp, onScreen = camera:WorldToViewportPoint(pos)
+                            
+                            if onScreen and sp.Z > 0 then
+                                local dist = (Vector2.new(sp.X, sp.Y) - mouse).Magnitude
+                                local within = (not cfg.Combat.SilentFovEnabled) or dist <= cfg.Combat.SilentFov
+                                
+                                -- Check if this specific part is closer to the crosshair than the previous best
+                                if within and (not bestDist or dist < bestDist) then
+                                    local isVis = true
+                                    
+                                    if cfg.Combat.SilentVisibleCheck then
+                                        local delta = pos - camPos
+                                        local p = RaycastParams.new()
+                                        p.FilterType = Enum.RaycastFilterType.Exclude
+                                        p.FilterDescendantsInstances = ignore
+                                        local hit = workspace:Raycast(camPos, delta, p)
+                                        if hit and not hit.Instance:IsDescendantOf(plr.Character) then
+                                            isVis = false
+                                        end
                                     end
-                                end
-                                if isVis then
-                                    best, bestDist = part, dist
+                                    
+                                    if isVis then
+                                        best, bestDist = part, dist
+                                    end
                                 end
                             end
                         end
                     end
+                    
                 end
             end
         end
