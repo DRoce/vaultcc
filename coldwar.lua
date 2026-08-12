@@ -148,10 +148,22 @@ local function findBest()
                 local hum = plr.Character:FindFirstChildOfClass("Humanoid")
                 if hum and hum.Health > 0 then
                     local targetParts = {}
-                    for _, child in ipairs(plr.Character:GetChildren()) do
-                        if child:IsA("BasePart") and child.Name ~= "HumanoidRootPart" then
-                            table.insert(targetParts, child)
+                    local targetSetting = cfg.Combat.SilentTarget
+
+                    if targetSetting == "All" then
+                        for _, child in ipairs(plr.Character:GetChildren()) do
+                            if child:IsA("BasePart") and child.Name ~= "HumanoidRootPart" then
+                                table.insert(targetParts, child)
+                            end
                         end
+                    elseif targetSetting == "Head and Torso" then
+                        for _, name in ipairs({"Head", "Torso", "UpperTorso", "LowerTorso"}) do
+                            local pt = plr.Character:FindFirstChild(name)
+                            if pt then table.insert(targetParts, pt) end
+                        end
+                    else
+                        local pt = plr.Character:FindFirstChild(targetSetting)
+                        if pt then table.insert(targetParts, pt) end
                     end
 
                     for _, part in ipairs(targetParts) do
@@ -1262,7 +1274,7 @@ aiming:AddDropdown("aimbotmethod", { Text = "Aim Method", Values = { "Camera", "
 Options['aimbotmethod']:OnChanged(function(val)
     cfg.Combat.AimbotMethod = val
 end)
-aiming:AddDropdown("aimbottarget", { Text = "Target part", Values = { "Head", "Torso", "HumanoidRootPart", "Left Arm", "Right Arm", "Left Leg", "Right Leg" }, Default = 1, Multi = false })
+aiming:AddDropdown("aimbottarget", { Text = "Target part", Values = { "All", "Head and Torso", "Head", "Torso", "HumanoidRootPart", "Left Arm", "Right Arm", "Left Leg", "Right Leg" }, Default = 3, Multi = false })
 Options['aimbottarget']:OnChanged(function(val)
     cfg.Combat.AimbotTarget = val
 end)
@@ -1289,7 +1301,7 @@ silent:AddToggle("silentenabled", { Text = "Enabled", Default = true, Tooltip = 
 Toggles['silentenabled']:OnChanged(function(val) -- silent enabled
     cfg.Combat.SilentEnabled = val
 end)
-silent:AddDropdown("silenttarget", { Text = "Target part", Values = { "Head", "Torso", "HumanoidRootPart", "Left Arm", "Right Arm", "Left Leg", "Right Leg" }, Default = 1, Multi = false })
+silent:AddDropdown("silenttarget", { Text = "Target part", Values = { "All", "Head and Torso", "Head", "Torso", "HumanoidRootPart", "Left Arm", "Right Arm", "Left Leg", "Right Leg" }, Default = 3, Multi = false })
 Options['silenttarget']:OnChanged(function(val) -- target part
     cfg.Combat.SilentTarget = val
     if espCfg then espCfg.HealthBar.Part = val end -- keep "Target part" health in sync
