@@ -142,39 +142,47 @@ local function findBest()
     local ig = workspace:FindFirstChild("Ignore")
     if ig then ignore[#ignore + 1] = ig end
 
+    local candidateParts = {}
+
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= me and plr.Character and not isDowned(plr.Character) then
             if (not (me.Team and plr.Team == me.Team)) or (not cfg.Combat.SilentExcludeTeammates) then
                 local hum = plr.Character:FindFirstChildOfClass("Humanoid")
                 if hum and hum.Health > 0 then
-                    local targetParts = {}
+                    local char = plr.Character
                     local targetSetting = cfg.Combat.SilentTarget
 
-                    if targetSetting == "All" then
-                        for _, child in ipairs(plr.Character:GetChildren()) do
+                    -- Fast zero-allocation part collection
+                    if targetSetting == "All" or targetSetting == "Closest Part" then
+                        for _, child in ipairs(char:GetChildren()) do
                             if child:IsA("BasePart") and child.Name ~= "HumanoidRootPart" then
-                                table.insert(targetParts, child)
+                                candidateParts[#candidateParts + 1] = child
                             end
                         end
                     elseif targetSetting == "Head and Torso" then
-                        for _, name in ipairs({"Head", "Torso", "UpperTorso", "LowerTorso"}) do
-                            local pt = plr.Character:FindFirstChild(name)
-                            if pt then table.insert(targetParts, pt) end
-                        end
+                        local head = char:FindFirstChild("Head")
+                        local torso = char:FindFirstChild("Torso") or char:FindFirstChild("UpperTorso") or char:FindFirstChild("LowerTorso")
+                        if head then candidateParts[#candidateParts + 1] = head end
+                        if torso then candidateParts[#candidateParts + 1] = torso end
                     else
-                        local pt = plr.Character:FindFirstChild(targetSetting)
-                        if pt then table.insert(targetParts, pt) end
+                        local pt = char:FindFirstChild(targetSetting)
+                        if pt then candidateParts[#candidateParts + 1] = pt end
                     end
 
-                    for _, part in ipairs(targetParts) do
+                    -- Distance & Screen Space filtering
+                    for i = 1, #candidateParts do
+                        local part = candidateParts[i]
                         local pos = part.Position
                         local studsDist = (pos - camPos).Magnitude
+                        
                         if (not cfg.Combat.SilentDistanceCheck) or studsDist <= cfg.Combat.SilentMaxDistance then
                             local sp, onScreen = camera:WorldToViewportPoint(pos)
                             if onScreen and sp.Z > 0 then
                                 local dist = (Vector2.new(sp.X, sp.Y) - mouse).Magnitude
                                 local within = (not cfg.Combat.SilentFovEnabled) or dist <= cfg.Combat.SilentFov
+                                
                                 if within and (not bestDist or dist < bestDist) then
+                                    -- LAZY RAYCASTING: Only raycast candidates that are ALREADY closer than current best
                                     local isVis = true
                                     if cfg.Combat.SilentVisibleCheck then
                                         local delta = pos - camPos
@@ -182,10 +190,11 @@ local function findBest()
                                         p.FilterType = Enum.RaycastFilterType.Exclude
                                         p.FilterDescendantsInstances = ignore
                                         local hit = workspace:Raycast(camPos, delta, p)
-                                        if hit and not hit.Instance:IsDescendantOf(plr.Character) then
+                                        if hit and not hit.Instance:IsDescendantOf(char) then
                                             isVis = false
                                         end
                                     end
+                                    
                                     if isVis then
                                         best, bestDist = part, dist
                                     end
@@ -193,6 +202,9 @@ local function findBest()
                             end
                         end
                     end
+
+                    -- Clear table without GC allocation
+                    table.clear(candidateParts)
                 end
             end
         end
@@ -1274,7 +1286,7 @@ aiming:AddDropdown("aimbotmethod", { Text = "Aim Method", Values = { "Camera", "
 Options['aimbotmethod']:OnChanged(function(val)
     cfg.Combat.AimbotMethod = val
 end)
-aiming:AddDropdown("aimbottarget", { Text = "Target part", Values = { "All", "Head and Torso", "Head", "Torso", "HumanoidRootPart", "Left Arm", "Right Arm", "Left Leg", "Right Leg" }, Default = 3, Multi = false })
+aiming:AddDropdown("aimbottarget", { Text = "Target part", Values = { "Closest Part", "All", "Head and Torso", "Head", "Torso", "HumanoidRootPart", "Left Arm", "Right Arm", "Left Leg", "Right Leg" }, Default = 1, Multi = false })
 Options['aimbottarget']:OnChanged(function(val)
     cfg.Combat.AimbotTarget = val
 end)
@@ -1301,7 +1313,7 @@ silent:AddToggle("silentenabled", { Text = "Enabled", Default = true, Tooltip = 
 Toggles['silentenabled']:OnChanged(function(val) -- silent enabled
     cfg.Combat.SilentEnabled = val
 end)
-silent:AddDropdown("silenttarget", { Text = "Target part", Values = { "All", "Head and Torso", "Head", "Torso", "HumanoidRootPart", "Left Arm", "Right Arm", "Left Leg", "Right Leg" }, Default = 3, Multi = false })
+silent:AddDropdown("silenttarget", { Text = "Target part", Values = { "Closest Part", "All", "Head and Torso", "Head", "Torso", "HumanoidRootPart", "Left Arm", "Right Arm", "Left Leg", "Right Leg" }, Default = 1, Multi = false })
 Options['silenttarget']:OnChanged(function(val) -- target part
     cfg.Combat.SilentTarget = val
     if espCfg then espCfg.HealthBar.Part = val end -- keep "Target part" health in sync
